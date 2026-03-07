@@ -8,7 +8,7 @@ using System.Reflection;
 
 namespace Oxide.Plugins
 {
-    [Info("WipelessCore", "Gemini", "7.1.1")]
+    [Info("WipelessCore", "Vidmoris", "1.0.0")]
     public class WipelessCore : RustPlugin
     {
         private StoredData storedData;
@@ -17,6 +17,8 @@ namespace Oxide.Plugins
         private Timer autoSaveTimer;
         
         private readonly FieldInfo isDataLoadedField = typeof(BaseEntity).GetField("isDataLoaded", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+
+        private const string AdminPermission = "wipelesscore.admin";
 
         #region Configuration
         private float AutoSaveInterval = 30f; // Minutes
@@ -29,6 +31,9 @@ namespace Oxide.Plugins
 
         private void Init()
         {
+            // Register the security permission for your commands
+            permission.RegisterPermission(AdminPermission, this);
+
             AutoSaveInterval = Convert.ToSingle(Config["AutoSaveIntervalMinutes"] ?? 30.0);
             
             autoSaveTimer = timer.Every(AutoSaveInterval * 60f, () => 
@@ -38,6 +43,13 @@ namespace Oxide.Plugins
             });
         }
         #endregion
+
+        // Helper method to check if a player is allowed to use commands
+        private bool HasAccess(BasePlayer player)
+        {
+            if (player == null) return true; // Console always has access
+            return permission.UserHasPermission(player.UserIDString, AdminPermission);
+        }
 
         public class ItemData {
             public int ItemID; public int Amount; public ulong SkinID; public int Slot; public float Condition; public float MaxCondition;
@@ -71,7 +83,7 @@ namespace Oxide.Plugins
         }
         
         public class StoredData { 
-            public Dictionary<ulong, EntityData> Entities = new Dictionary<ulong, EntityData>(); 
+            public List<EntityData> Entities = new List<EntityData>(); 
         }
 
         void Loaded() => storedData = Interface.Oxide.DataFileSystem.ReadObject<StoredData>(Name) ?? new StoredData();
@@ -120,20 +132,21 @@ namespace Oxide.Plugins
         }
 
         [ChatCommand("save")]
-        void cmdSave(BasePlayer player) => ExecuteSave(player);
+        void cmdSave(BasePlayer player) {
+            if (!HasAccess(player)) return;
+            ExecuteSave(player);
+        }
 
         private void ExecuteSave(BasePlayer requester) {
             var allEntities = BaseNetworkable.serverEntities.OfType<BaseEntity>().Where(IsValidTarget).ToList();
-            HashSet<ulong> currentWorldNetIDs = new HashSet<ulong>();
             Dictionary<BaseEntity, int> entToId = new Dictionary<BaseEntity, int>();
             int currentId = 1;
 
             foreach (var ent in allEntities) entToId[ent] = currentId++;
 
-            foreach (var ent in allEntities) {
-                ulong netID = ent.net.ID.Value;
-                currentWorldNetIDs.Add(netID);
+            storedData.Entities.Clear();
 
+            foreach (var ent in allEntities) {
                 var eData = new EntityData {
                     ID = entToId[ent], PrefabName = ent.PrefabName,
                     x = ent.transform.position.x, y = ent.transform.position.y, z = ent.transform.position.z,
@@ -203,18 +216,19 @@ namespace Oxide.Plugins
                         }
                     }
                 }
-                storedData.Entities[netID] = eData;
+                storedData.Entities.Add(eData);
             }
 
-            var keysToRemove = storedData.Entities.Keys.Where(k => !currentWorldNetIDs.Contains(k)).ToList();
-            foreach (var key in keysToRemove) storedData.Entities.Remove(key);
-
             Interface.Oxide.DataFileSystem.WriteObject(Name, storedData);
+            
+            // CUSTOM LOG: Output the saved amount to console
+            Puts($"saved ammount of assets: {storedData.Entities.Count}");
             if (requester != null) PrintToChat(requester, $"Forever-Save Complete. {storedData.Entities.Count} entities tracked.");
         }
 
         [ChatCommand("load")]
         void cmdLoad(BasePlayer player) {
+            if (!HasAccess(player)) return;
             if (isSystemLoading) { PrintToChat(player, "A load is already in progress."); return; }
             ServerMgr.Instance.StartCoroutine(StrictLoadRoutine(player));
         }
@@ -224,7 +238,7 @@ namespace Oxide.Plugins
             preLoadStabilityState = ConVar.Server.stability;
             ConVar.Server.stability = false;
 
-            var sorted = storedData.Entities.Values.OrderBy(e => e.Priority).ToList();
+            var sorted = storedData.Entities.OrderBy(e => e.Priority).ToList();
             List<BaseEntity> spawnedEntities = new List<BaseEntity>();
             Dictionary<uint, uint> idMap = new Dictionary<uint, uint>();
             Dictionary<int, BaseEntity> idToEnt = new Dictionary<int, BaseEntity>();
@@ -239,7 +253,11 @@ namespace Oxide.Plugins
 
                     if (!(ent is SleepingBag) && isDataLoadedField != null) isDataLoadedField.SetValue(ent, true);
                     
-                    if (ent is BuildingBlock bb) bb.grade = data.Grade;
+                    if (ent is BuildingBlock bb) {
+                        bb.grade = data.Grade;
+                        bb.skinID = data.SkinID;
+                        bb.UpdateSkin();
+                    }
                     
                     if (ent is DecayEntity decayEnt && data.BuildingID != 0) {
                         if (!idMap.ContainsKey(data.BuildingID)) idMap[data.BuildingID] = BuildingManager.server.NewBuildingID();
@@ -351,10 +369,10 @@ namespace Oxide.Plugins
 
             ConVar.Server.stability = preLoadStabilityState;
             isSystemLoading = false;
+
+            // CUSTOM LOG: Output the loaded amount to console
+            Puts($"Loaded ammount of assets: {spawnedEntities.Count}");
             
-            // FIX: Delay the Map UI synchronization by 3 seconds.
-            // This ensures the client has fully loaded the physical sleeping bag entities 
-            // into their local memory before the server asks them to draw the map markers.
             timer.Once(3f, () => {
                 foreach (var activePlayer in BasePlayer.activePlayerList) {
                     if (activePlayer != null && activePlayer.IsConnected) {
@@ -369,12 +387,17 @@ namespace Oxide.Plugins
 
         [ChatCommand("wipe")]
         void cmdWipe(BasePlayer player) {
+            if (!HasAccess(player)) return;
+            
             var toDestroy = BaseNetworkable.serverEntities.OfType<BaseEntity>().Where(IsValidTarget).ToList();
             int destroyedCount = 0;
             foreach (var ent in toDestroy) {
                 if (ent != null && !ent.IsDestroyed) { ent.Kill(BaseNetworkable.DestroyMode.None); destroyedCount++; }
             }
-            PrintToChat(player, $"Wipe Complete. {destroyedCount} entities removed.");
+            
+            // CUSTOM LOG: Output the wiped amount to console
+            Puts($"wiped ammount of assets: {destroyedCount}");
+            if (player != null) PrintToChat(player, $"Wipe Complete. {destroyedCount} entities removed.");
         }
     }
 }
