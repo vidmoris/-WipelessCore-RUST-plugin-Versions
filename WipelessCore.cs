@@ -8,7 +8,7 @@ using System.Reflection;
 
 namespace Oxide.Plugins
 {
-    [Info("WipelessCore", "Vidmoris", "1.0.0")]
+    [Info("WipelessCore", "Vidmoris", "1.0.9")]
     public class WipelessCore : RustPlugin
     {
         private StoredData storedData;
@@ -31,9 +31,7 @@ namespace Oxide.Plugins
 
         private void Init()
         {
-            // Register the security permission for your commands
             permission.RegisterPermission(AdminPermission, this);
-
             AutoSaveInterval = Convert.ToSingle(Config["AutoSaveIntervalMinutes"] ?? 30.0);
             
             autoSaveTimer = timer.Every(AutoSaveInterval * 60f, () => 
@@ -44,15 +42,10 @@ namespace Oxide.Plugins
         }
         #endregion
 
-        // Helper method to check if a player is allowed to use commands
-        private bool HasAccess(BasePlayer player)
-        {
-            if (player == null) return true; // Console always has access
-            return permission.UserHasPermission(player.UserIDString, AdminPermission);
-        }
-
+        #region Data Classes
         public class ItemData {
             public int ItemID; public int Amount; public ulong SkinID; public int Slot; public float Condition; public float MaxCondition;
+            public int DataInt; public bool HasInstanceData; public int BlueprintTarget; 
         }
 
         public class PointData { public float x, y, z; }
@@ -75,15 +68,25 @@ namespace Oxide.Plugins
             public bool IsOpen; public ulong SkinID; 
             public bool IsLocked; public string LockCode; public string GuestCode;
             public string BagName; public List<ulong> TurretAuth;
+            public string ShopName; 
             public List<SellOrderData> VendingOrders; public List<ulong> LockWhitelist;
             public List<ulong> GuestWhitelist; public List<ulong> TCAuthList;
             public List<ItemData> Inventory; public List<WireData> Connections;
+            public byte[] InventoryData; 
             public string IOString; public float IOFloat; public int IOInt;
             public float BatteryCharge; public List<int> ConveyorFilters;
+            public float SoilMoisture; 
+            public byte[] PlantData; 
         }
         
         public class StoredData { 
             public List<EntityData> Entities = new List<EntityData>(); 
+        }
+        #endregion
+
+        private bool HasAccess(BasePlayer player) {
+            if (player == null) return true;
+            return permission.UserHasPermission(player.UserIDString, AdminPermission);
         }
 
         void Loaded() => storedData = Interface.Oxide.DataFileSystem.ReadObject<StoredData>(Name) ?? new StoredData();
@@ -100,17 +103,24 @@ namespace Oxide.Plugins
             if (prefab.Contains("wall") || prefab.Contains("pillar")) return 1;
             if (prefab.Contains("floor") || prefab.Contains("roof") || prefab.Contains("stairs")) return 2;
             if (prefab.Contains("door") || prefab.Contains("hatch")) return 3;
-            if (prefab.Contains("box") || prefab.Contains("cupboard") || prefab.Contains("stash") || prefab.Contains("oven") || prefab.Contains("furnace") || prefab.Contains("vending")) return 4;
-            if (prefab.Contains("lock")) return 6; 
-            return 5; 
+            if (prefab.Contains("box") || prefab.Contains("cupboard") || prefab.Contains("stash") || prefab.Contains("oven") || prefab.Contains("furnace") || prefab.Contains("vending") || prefab.Contains("planter")) return 4;
+            if (prefab.Contains("horse") || prefab.Contains("chicken")) return 5;
+            if (prefab.Contains("lock") || prefab.Contains("plant") || prefab.Contains("hemp") || prefab.Contains("berry") || prefab.Contains("potato") || prefab.Contains("corn") || prefab.Contains("pumpkin")) return 6; 
+            return 7; 
         }
 
         bool IsValidTarget(BaseEntity e) {
             if (e == null || e.IsDestroyed || e.net == null) return false;
+            
+            // Explicit exemption for Horses and Chickens so they aren't ignored for lacking an OwnerID
+            bool isHorseOrChicken = e is RidableHorse || e.PrefabName.Contains("chicken");
+            if (isHorseOrChicken) return true;
+
             if (e.OwnerID == 0) return false; 
             if (e is BasePlayer || e is BaseNpc || e is BaseCorpse || e is LootContainer || e is DroppedItem || e is DroppedItemContainer) return false;
             if (e.HasParent() && (e.GetParentEntity() is BaseVehicle)) return false;
-            return e is BuildingBlock || e is Door || e is BaseLock || e is StorageContainer || e is IOEntity || e is DecayEntity || e is BaseCombatEntity;
+            
+            return e is BuildingBlock || e is Door || e is BaseLock || e is StorageContainer || e is IOEntity || e is DecayEntity || e is BaseCombatEntity || e is PlanterBox || e is GrowableEntity || e is VendingMachine;
         }
 
         object GetValue(object obj, string name) {
@@ -161,11 +171,48 @@ namespace Oxide.Plugins
                 if (ent is BuildingBlock bb) eData.Grade = bb.grade;
                 if (ent is Door door) eData.IsOpen = door.IsOpen();
                 
-                if (ent is StorageContainer container && container.inventory != null) {
+                if (ent is VendingMachine vm) {
+                    if (vm.sellOrders?.sellOrders != null) {
+                        eData.ShopName = vm.shopName;
+                        eData.VendingOrders = vm.sellOrders.sellOrders.Select(o => new SellOrderData {
+                            ItemID = Convert.ToInt32(GetValue(o, "itemToSellID") ?? 0),
+                            Amount = Convert.ToInt32(GetValue(o, "itemToSellAmount") ?? 0),
+                            CurrencyID = Convert.ToInt32(GetValue(o, "currencyID") ?? 0),
+                            CurrencyAmount = Convert.ToInt32(GetValue(o, "currencyAmountPerItem") ?? 0),
+                            ItemIsBP = Convert.ToBoolean(GetValue(o, "itemIsBlueprint") ?? false),
+                            CurrencyIsBP = Convert.ToBoolean(GetValue(o, "currencyIsBlueprint") ?? false)
+                        }).ToList();
+                    }
+                    if (vm.inventory != null) {
+                        eData.Inventory = vm.inventory.itemList.Select(item => new ItemData {
+                            ItemID = item.info.itemid, Amount = item.amount, SkinID = item.skin, Slot = item.position, 
+                            Condition = item.condition, MaxCondition = item.maxCondition,
+                            HasInstanceData = item.instanceData != null, DataInt = item.instanceData != null ? item.instanceData.dataInt : 0, BlueprintTarget = item.instanceData != null ? item.instanceData.blueprintTarget : 0
+                        }).ToList();
+                    }
+                }
+                else if (ent is StorageContainer container && container.inventory != null) {
+                    var invSave = container.inventory.Save();
+                    if (invSave != null) eData.InventoryData = invSave.ToProtoBytes();
+
                     eData.Inventory = container.inventory.itemList.Select(item => new ItemData {
-                        ItemID = item.info.itemid, Amount = item.amount, SkinID = item.skin, Slot = item.position, Condition = item.condition, MaxCondition = item.maxCondition
+                        ItemID = item.info.itemid, Amount = item.amount, SkinID = item.skin, Slot = item.position, 
+                        Condition = item.condition, MaxCondition = item.maxCondition,
+                        HasInstanceData = item.instanceData != null, DataInt = item.instanceData != null ? item.instanceData.dataInt : 0, BlueprintTarget = item.instanceData != null ? item.instanceData.blueprintTarget : 0
                     }).ToList();
+                    
                     if (ent is BuildingPrivlidge tc) eData.TCAuthList = tc.authorizedPlayers.ToList();
+                }
+
+                if (ent is PlanterBox planter) {
+                    var waterLevel = GetValue(planter, "soilSaturation") ?? GetValue(planter, "soilMoisture") ?? 0f;
+                    eData.SoilMoisture = Convert.ToSingle(waterLevel); 
+                }
+
+                if (ent is GrowableEntity plant) {
+                    var msg = new ProtoBuf.Entity();
+                    plant.Save(new BaseNetworkable.SaveInfo { forDisk = true, msg = msg });
+                    if (msg.growableEntity != null) { eData.PlantData = msg.growableEntity.ToProtoBytes(); }
                 }
 
                 if (ent is CodeLock cLock) {
@@ -177,17 +224,6 @@ namespace Oxide.Plugins
 
                 if (ent is SleepingBag bag) { eData.BagName = bag.niceName; eData.DeployerID = bag.deployerUserID; }
                 if (ent is AutoTurret turret && turret.authorizedPlayers != null) eData.TurretAuth = turret.authorizedPlayers.ToList();
-
-                if (ent is VendingMachine vm && vm.sellOrders?.sellOrders != null) {
-                    eData.VendingOrders = vm.sellOrders.sellOrders.Select(o => new SellOrderData {
-                        ItemID = Convert.ToInt32(GetValue(o, "itemToSellID") ?? 0),
-                        Amount = Convert.ToInt32(GetValue(o, "itemToSellAmount") ?? 0),
-                        CurrencyID = Convert.ToInt32(GetValue(o, "currencyID") ?? 0),
-                        CurrencyAmount = Convert.ToInt32(GetValue(o, "currencyAmountPerItem") ?? 0),
-                        ItemIsBP = Convert.ToBoolean(GetValue(o, "itemIsBlueprint") ?? false),
-                        CurrencyIsBP = Convert.ToBoolean(GetValue(o, "currencyIsBlueprint") ?? false)
-                    }).ToList();
-                }
 
                 if (ent is IOEntity ioEnt) {
                     eData.IOString = GetValue(ioEnt, "rcIdentifier") as string;
@@ -220,9 +256,7 @@ namespace Oxide.Plugins
             }
 
             Interface.Oxide.DataFileSystem.WriteObject(Name, storedData);
-            
-            // CUSTOM LOG: Output the saved amount to console
-            Puts($"saved ammount of assets: {storedData.Entities.Count}");
+            Puts($"[WipelessCore] Total assets saved: {storedData.Entities.Count}");
             if (requester != null) PrintToChat(requester, $"Forever-Save Complete. {storedData.Entities.Count} entities tracked.");
         }
 
@@ -238,13 +272,36 @@ namespace Oxide.Plugins
             preLoadStabilityState = ConVar.Server.stability;
             ConVar.Server.stability = false;
 
+            // --- THE PRE-LOAD WIPE FOR HORSES AND CHICKENS ---
+            var existingAnimals = BaseNetworkable.serverEntities.OfType<BaseEntity>()
+                .Where(x => x is RidableHorse || x.PrefabName.Contains("chicken"))
+                .ToList();
+            
+            foreach (var animal in existingAnimals) {
+                if (animal != null && !animal.IsDestroyed) {
+                    animal.Kill(BaseNetworkable.DestroyMode.None);
+                }
+            }
+            Puts($"[WipelessCore] Pre-load wipe cleared {existingAnimals.Count} existing horses and chickens to prevent duplicates.");
+            // -------------------------------------------------
+
             var sorted = storedData.Entities.OrderBy(e => e.Priority).ToList();
             List<BaseEntity> spawnedEntities = new List<BaseEntity>();
             Dictionary<uint, uint> idMap = new Dictionary<uint, uint>();
             Dictionary<int, BaseEntity> idToEnt = new Dictionary<int, BaseEntity>();
 
             foreach (var data in sorted) {
-                BaseEntity ent = GameManager.server.CreateEntity(data.PrefabName, new Vector3(data.x, data.y, data.z), new Quaternion(data.rx, data.ry, data.rz, data.rw));
+                Vector3 spawnPos = new Vector3(data.x, data.y, data.z);
+
+                if (data.ParentID == 0 && !data.PrefabName.Contains("planter") && (data.PrefabName.Contains("plant") || data.PrefabName.Contains("hemp") || data.PrefabName.Contains("berry") || data.PrefabName.Contains("potato") || data.PrefabName.Contains("corn") || data.PrefabName.Contains("pumpkin"))) 
+                {
+                    if (TerrainMeta.HeightMap != null) {
+                        float terrainY = TerrainMeta.HeightMap.GetHeight(spawnPos);
+                        if (Mathf.Abs(spawnPos.y - terrainY) < 0.2f) spawnPos.y = terrainY;
+                    }
+                }
+
+                BaseEntity ent = GameManager.server.CreateEntity(data.PrefabName, spawnPos, new Quaternion(data.rx, data.ry, data.rz, data.rw));
                 if (ent != null) {
                     idToEnt[data.ID] = ent;
                     
@@ -252,12 +309,6 @@ namespace Oxide.Plugins
                     ent.skinID = data.SkinID; 
 
                     if (!(ent is SleepingBag) && isDataLoadedField != null) isDataLoadedField.SetValue(ent, true);
-                    
-                    if (ent is BuildingBlock bb) {
-                        bb.grade = data.Grade;
-                        bb.skinID = data.SkinID;
-                        bb.UpdateSkin();
-                    }
                     
                     if (ent is DecayEntity decayEnt && data.BuildingID != 0) {
                         if (!idMap.ContainsKey(data.BuildingID)) idMap[data.BuildingID] = BuildingManager.server.NewBuildingID();
@@ -290,41 +341,134 @@ namespace Oxide.Plugins
                         ent.Spawn();
                     }
 
-                    if (ent is SleepingBag bagPost) {
-                        bagPost.unlockTime = 0f; 
+                    if (ent is GrowableEntity plantPost && data.PlantData != null && data.PlantData.Length > 0) {
+                        var growableProto = ProtoBuf.GrowableEntity.Deserialize(data.PlantData); 
+                        if (growableProto != null) {
+                            var msg = new ProtoBuf.Entity { growableEntity = growableProto };
+                            plantPost.Load(new BaseNetworkable.LoadInfo { fromDisk = true, msg = msg });
+                            plantPost.SendNetworkUpdate(); 
+                        }
                     }
 
-                    if (ent is BuildingBlock bbPost) bbPost.SetHealth(data.Health);
-                    else if (ent is Door door) door.SetOpen(data.IsOpen);
+                    if (ent is SleepingBag bagPost) bagPost.unlockTime = 0f; 
+
+                    if (ent is BuildingBlock bbPost) {
+                        bbPost.SetGrade(data.Grade);
+                        bbPost.skinID = data.SkinID; 
+                        bbPost.UpdateSkin(); 
+                    }
+                    
+                    if (ent is BaseCombatEntity bcePost) {
+                        if (data.Health > 0) bcePost.SetHealth(data.Health);
+                    }
+
+                    if (ent is Door door) door.SetOpen(data.IsOpen);
+                    
+                    if (ent is VendingMachine vmPost) {
+                        if (!string.IsNullOrEmpty(data.ShopName)) vmPost.shopName = data.ShopName;
+                        if (data.VendingOrders != null) {
+                            vmPost.sellOrders = new ProtoBuf.VendingMachine.SellOrderContainer { sellOrders = new List<ProtoBuf.VendingMachine.SellOrder>() };
+                            SetValue(vmPost.sellOrders, "ShouldPool", false);
+                            
+                            foreach (var o in data.VendingOrders) {
+                                var n = new ProtoBuf.VendingMachine.SellOrder();
+                                SetValue(n, "ShouldPool", false);
+                                SetValue(n, "itemToSellID", o.ItemID); 
+                                SetValue(n, "itemToSellAmount", o.Amount);
+                                SetValue(n, "currencyID", o.CurrencyID); 
+                                SetValue(n, "currencyAmountPerItem", o.CurrencyAmount);
+                                SetValue(n, "itemIsBlueprint", o.ItemIsBP); 
+                                SetValue(n, "currencyIsBlueprint", o.CurrencyIsBP);
+                                vmPost.sellOrders.sellOrders.Add(n);
+                            }
+                        }
+
+                        if (data.Inventory != null && data.Inventory.Count > 0) {
+                            var localInvData = data.Inventory.ToList(); 
+                            timer.Once(0.5f, () => {
+                                if (vmPost == null || vmPost.IsDestroyed || vmPost.inventory == null) return;
+                                while (vmPost.inventory.itemList.Count > 0) {
+                                    var temp = vmPost.inventory.itemList[0];
+                                    temp.RemoveFromContainer();
+                                    temp.Remove();
+                                }
+                                int maxSlot = localInvData.Max(x => x.Slot);
+                                if (vmPost.inventory.capacity <= maxSlot) vmPost.inventory.capacity = maxSlot + 1;
+
+                                bool wasLocked = vmPost.inventory.HasFlag(ItemContainer.Flag.IsLocked);
+                                vmPost.inventory.SetFlag(ItemContainer.Flag.IsLocked, false);
+                                var prevAccept = vmPost.inventory.canAcceptItem;
+                                vmPost.inventory.canAcceptItem = null;
+
+                                foreach (var i in localInvData) {
+                                    Item item = ItemManager.CreateByItemID(i.ItemID, i.Amount, i.SkinID);
+                                    if (item != null) {
+                                        item.condition = i.Condition;
+                                        item.maxCondition = i.MaxCondition;
+                                        if (i.HasInstanceData) item.instanceData = new ProtoBuf.Item.InstanceData { ShouldPool = false, dataInt = i.DataInt, blueprintTarget = i.BlueprintTarget };
+                                        item.parent = vmPost.inventory;
+                                        item.position = i.Slot;
+                                        vmPost.inventory.itemList.Add(item);
+                                        item.MarkDirty();
+                                    }
+                                }
+                                vmPost.inventory.SetFlag(ItemContainer.Flag.IsLocked, wasLocked);
+                                vmPost.inventory.canAcceptItem = prevAccept;
+                                vmPost.inventory.MarkDirty();
+
+                                vmPost.RefreshSellOrderStockLevel();
+                                vmPost.UpdateMapMarker();
+                                vmPost.SendNetworkUpdateImmediate();
+                            });
+                        } else {
+                            vmPost.RefreshSellOrderStockLevel();
+                            vmPost.UpdateMapMarker();
+                            vmPost.SendNetworkUpdateImmediate();
+                        }
+                    }
                     else if (ent is StorageContainer container) {
-                        if (data.Inventory != null) {
+                        if (data.InventoryData != null && data.InventoryData.Length > 0) {
+                            var invProto = ProtoBuf.ItemContainer.Deserialize(data.InventoryData);
+                            if (invProto != null) {
+                                container.inventory.Load(invProto);
+                                container.inventory.MarkDirty();
+                            }
+                        } else if (data.Inventory != null) {
                             container.inventory.Clear();
                             foreach (var i in data.Inventory) {
                                 Item item = ItemManager.CreateByItemID(i.ItemID, i.Amount, i.SkinID);
-                                if (item != null) item.MoveToContainer(container.inventory, i.Slot);
+                                if (item != null) {
+                                    item.condition = i.Condition;
+                                    item.maxCondition = i.MaxCondition;
+                                    if (i.HasInstanceData) item.instanceData = new ProtoBuf.Item.InstanceData { ShouldPool = false, dataInt = i.DataInt, blueprintTarget = i.BlueprintTarget };
+                                    
+                                    item.parent = container.inventory;
+                                    item.position = i.Slot;
+                                    container.inventory.itemList.Add(item);
+                                    item.MarkDirty();
+                                }
                             }
+                            container.inventory.MarkDirty();
                         }
+                        
+                        container.SendNetworkUpdateImmediate();
                         if (container is BuildingPrivlidge tc && data.TCAuthList != null) tc.authorizedPlayers = new HashSet<ulong>(data.TCAuthList);
                     }
 
-                    if (ent is AutoTurret turretPost && data.TurretAuth != null) turretPost.authorizedPlayers = new HashSet<ulong>(data.TurretAuth);
-
-                    if (ent is VendingMachine vmPost && data.VendingOrders != null) {
-                        vmPost.sellOrders = new ProtoBuf.VendingMachine.SellOrderContainer { sellOrders = new List<ProtoBuf.VendingMachine.SellOrder>() };
-                        foreach (var o in data.VendingOrders) {
-                            var n = new ProtoBuf.VendingMachine.SellOrder();
-                            SetValue(n, "itemToSellID", o.ItemID); SetValue(n, "itemToSellAmount", o.Amount);
-                            SetValue(n, "currencyID", o.CurrencyID); SetValue(n, "currencyAmountPerItem", o.CurrencyAmount);
-                            SetValue(n, "itemIsBlueprint", o.ItemIsBP); SetValue(n, "currencyIsBlueprint", o.CurrencyIsBP);
-                            vmPost.sellOrders.sellOrders.Add(n);
-                        }
+                    if (ent is PlanterBox planterPost) {
+                        SetValue(planterPost, "soilSaturation", data.SoilMoisture);
+                        SetValue(planterPost, "soilMoisture", data.SoilMoisture);
+                        planterPost.SendNetworkUpdate();
                     }
+
+                    if (ent is AutoTurret turretPost && data.TurretAuth != null) turretPost.authorizedPlayers = new HashSet<ulong>(data.TurretAuth);
 
                     if (ent is IOEntity ioEnt) {
                         if (!string.IsNullOrEmpty(data.IOString)) SetValue(ioEnt, "rcIdentifier", data.IOString);
                         if (data.IOFloat > 0) SetValue(ioEnt, "timerLength", data.IOFloat);
                         if (data.IOInt > 0) { SetValue(ioEnt, "branchAmount", data.IOInt); SetValue(ioEnt, "frequency", data.IOInt); }
                         if (data.BatteryCharge > 0) { SetValue(ioEnt, "charge", data.BatteryCharge); SetValue(ioEnt, "capacity", data.BatteryCharge); }
+                        
                         if (ioEnt is IndustrialConveyor conv && data.ConveyorFilters != null) {
                             conv.filterItems = new List<IndustrialConveyor.ItemFilter>();
                             foreach (var id in data.ConveyorFilters) {
@@ -362,7 +506,6 @@ namespace Oxide.Plugins
                 if (ent == null) continue;
                 if (!(ent is SleepingBag) && isDataLoadedField != null) isDataLoadedField.SetValue(ent, false);
                 
-                if (ent is BuildingBlock bb) bb.UpdateSkin(); 
                 if (ent is DecayEntity de) BuildingManager.server.Add(de);
                 ent.SendNetworkUpdate();
             }
@@ -370,8 +513,7 @@ namespace Oxide.Plugins
             ConVar.Server.stability = preLoadStabilityState;
             isSystemLoading = false;
 
-            // CUSTOM LOG: Output the loaded amount to console
-            Puts($"Loaded ammount of assets: {spawnedEntities.Count}");
+            Puts($"[WipelessCore] Loaded {spawnedEntities.Count} assets.");
             
             timer.Once(3f, () => {
                 foreach (var activePlayer in BasePlayer.activePlayerList) {
@@ -395,8 +537,7 @@ namespace Oxide.Plugins
                 if (ent != null && !ent.IsDestroyed) { ent.Kill(BaseNetworkable.DestroyMode.None); destroyedCount++; }
             }
             
-            // CUSTOM LOG: Output the wiped amount to console
-            Puts($"wiped ammount of assets: {destroyedCount}");
+            Puts($"[WipelessCore] Wiped {destroyedCount} assets.");
             if (player != null) PrintToChat(player, $"Wipe Complete. {destroyedCount} entities removed.");
         }
     }
