@@ -5,7 +5,7 @@ A plugin that bypasses the rust wipes by saving sepratly. Perfect for peopel Hos
 /load -- Loads bases from .json files in Oxide
 /wipe -- Wipes bases from the map ONLY.
 
-What are the PROS?
-It can save Items,Bases,Codes,doors and even Electricals. 
+o.grant user <name/ID> wipelesscore.admin -- Grants the you permissions to use the commands above.
 
-Cons. this is version 1.0.0 so Bugs are Expected In this script. Dont scream at me to fix a bug because this script is in early stages of development.
+
+This plugin gets Update every game update. So dont worry about one day losing all suff. This plugin works only with Custom Maps and as of right now im not planing to add FULL map saving but i do plan to add a Map asset patching system that gona Place assets back that got renamed and cant spawn anymore due to the new names. This Plugin is in early stage of developments and in few months or weeks the plugin should be fully saving everything.
